@@ -28,7 +28,6 @@ jobs:
           echo "Cloning prebuilt Android partition tools..."
           git clone --depth=1 https://github.com/Rprop/aosp15_partition_tools.git temp_tools
           
-          # Copy all Linux prebuilt partition binaries to bin/
           if [ -d "temp_tools/linux_glibc_x86_64" ]; then
             cp temp_tools/linux_glibc_x86_64/* bin/
           else
@@ -46,14 +45,30 @@ jobs:
 
       - name: Convert Sparse to Raw Super Image
         run: |
-          echo "Checking if image is sparse..."
-          if simg2img input_super.img super_raw.img 2>/dev/null; then
-            echo "Successfully unsparsed super image."
-            rm input_super.img
-          else
-            echo "Image is already raw."
-            mv input_super.img super_raw.img
-          fi
+          python3 - << 'EOF'
+          import os
+          import subprocess
+
+          input_file = "input_super.img"
+          raw_file = "super_raw.img"
+
+          if not os.path.exists(input_file):
+              raise FileNotFoundError(f"{input_file} does not exist.")
+
+          with open(input_file, "rb") as f:
+              magic = f.read(4)
+
+          # 0xed26764b in little-endian byte format is b"\x4b\x76\x26\xed"
+          if magic == b"\x4b\x76\x26\xed":
+              print("Header magic matches Android Sparse Image (0xed26764b).")
+              print("Converting sparse image to raw image using simg2img...")
+              subprocess.run(["simg2img", input_file, raw_file], check=True)
+              os.remove(input_file)
+              print("Successfully unsparsed super image.")
+          else:
+              print("Header magic does not match sparse image. Treating as raw image.")
+              os.rename(input_file, raw_file)
+          EOF
 
       - name: Extract Dynamic Partitions
         run: |
