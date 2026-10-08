@@ -7,15 +7,6 @@ on:
         description: 'Direct Download URL to super.img'
         required: true
         type: string
-      remove_list:
-        description: 'List of paths to delete (format: partition_name/relative_path)'
-        required: true
-        type: string
-        default: |
-          product_a/app/YouTube
-          product_a/priv-app/Velvet
-          vendor_a/app/Chrome
-          system_a/app/GooglePay
 
 jobs:
   debloat_and_repack:
@@ -30,10 +21,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y android-sdk-libsparse-utils e2fsprogs python3 wget
           
-          # Install lpunpack, lpmake, and lpdump binaries
-          sudo apt-get install -y android-tools-mkbootimg || true
-          
-          # Download static Android OS host tools
+          # Install static Android OS host tools (lpmake, lpunpack, lpdump)
           mkdir -p bin
           wget -q https://github.com/unix-tools/android-tools/releases/download/v34.0.4/lpmake -O bin/lpmake
           wget -q https://github.com/unix-tools/android-tools/releases/download/v34.0.4/lpunpack -O bin/lpunpack
@@ -43,7 +31,7 @@ jobs:
 
       - name: Download Super Image
         run: |
-          echo "Downloading super.img..."
+          echo "Downloading super.img from provided link..."
           wget -q --show-progress -O input_super.img "${{ github.event.inputs.super_url }}"
 
       - name: Convert Sparse to Raw Super Image
@@ -65,10 +53,22 @@ jobs:
           ls -lh extracted_partitions/
 
       - name: Mount EXT4 Partitions and Delete Bloatware
+        env:
+          # ====================================================================
+          # EDIT YOUR MANUALLY HARDCODED BLOATWARE LIST HERE
+          # Format: partition_name/relative_path
+          # ====================================================================
+          DEBLOAT_LIST: |
+            product_a/app/YouTube
+            product_a/priv-app/Velvet
+            vendor_a/app/Chrome
+            system_a/app/GooglePay
+            system_ext_a/priv-app/SetupWizard
+          # ====================================================================
         run: |
           mkdir -p /tmp/target_mnt
 
-          echo "${{ github.event.inputs.remove_list }}" | while read -r line; do
+          echo "$DEBLOAT_LIST" | while read -r line; do
             clean_line=$(echo "$line" | xargs)
             if [ -n "$clean_line" ]; then
               PART_NAME=$(echo "$clean_line" | cut -d'/' -f1)
@@ -109,8 +109,6 @@ jobs:
 
           # Run lpdump to read original metadata
           lpdump_out = subprocess.check_output(["lpdump", "super_raw.img"]).decode("utf-8")
-          print("--- Original lpdump Output ---")
-          print(lpdump_out[:1500]) # Print header for verification
 
           # Parse total super size
           size_match = re.search(r"Size:\s+(\d+)\s+bytes", lpdump_out)
@@ -126,7 +124,6 @@ jobs:
           # Parse groups
           groups = re.findall(r"Group\s+([\w_]+):\s+size\s+(\d+)", lpdump_out)
           if not groups:
-              # Fallback regex for standard lpdump format
               groups = re.findall(r"Name:\s+([\w_]+)\n\s+Maximum size:\s+(\d+)\s+bytes", lpdump_out)
 
           cmd = [
@@ -145,7 +142,6 @@ jobs:
                   cmd.append(f"--group={g_name}:{g_size}")
                   added_groups.add(g_name)
 
-          # Default group fallback if none found
           if not added_groups:
               cmd.append(f"--group=unisoc_dynamic_partitions_a:{super_size}")
               cmd.append(f"--group=unisoc_dynamic_partitions_b:0")
@@ -159,7 +155,6 @@ jobs:
                   fpath = os.path.join(part_dir, fname)
                   psize = os.path.getsize(fpath)
                   
-                  # Determine partition group
                   assigned_group = "default"
                   if pname.endswith("_a"):
                       for g in added_groups:
@@ -175,10 +170,7 @@ jobs:
                   if assigned_group == "default" and added_groups:
                       assigned_group = list(added_groups)[0]
 
-                  # Add partition configuration
                   cmd.append(f"--partition={pname}:none:{psize}:{assigned_group}")
-                  
-                  # Assign image if size > 0
                   if psize > 0:
                       cmd.append(f"--image={pname}={fpath}")
 
