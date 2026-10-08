@@ -28,8 +28,12 @@ jobs:
           echo "Cloning prebuilt Android partition tools..."
           git clone --depth=1 https://github.com/Rprop/aosp15_partition_tools.git temp_tools
           
-          # Dynamically locate and copy lpmake, lpunpack, and lpdump binaries to bin/
-          find temp_tools -type f \( -name "lpmake" -o -name "lpunpack" -o -name "lpdump" \) -exec cp {} bin/ \;
+          # Copy all Linux prebuilt partition binaries to bin/
+          if [ -d "temp_tools/linux_glibc_x86_64" ]; then
+            cp temp_tools/linux_glibc_x86_64/* bin/
+          else
+            find temp_tools -type f \( -name "lpmake" -o -name "lpunpack" -o -name "lpdump" \) -exec cp {} bin/ \;
+          fi
           rm -rf temp_tools
 
           chmod +x bin/* || true
@@ -112,25 +116,44 @@ jobs:
           import subprocess
           import re
           import os
+          import shutil
 
-          # Run lpdump to read original metadata
-          lpdump_out = subprocess.check_output(["lpdump", "super_raw.img"]).decode("utf-8")
+          # Prepend workspace bin directory to PATH for python sub-processes
+          workspace_bin = os.path.join(os.environ.get("GITHUB_WORKSPACE", ""), "bin")
+          if workspace_bin and workspace_bin not in os.environ.get("PATH", ""):
+              os.environ["PATH"] = f"{workspace_bin}:{os.environ.get('PATH', '')}"
 
-          # Parse total super size
-          size_match = re.search(r"Size:\s+(\d+)\s+bytes", lpdump_out)
-          super_size = size_match.group(1) if size_match else str(os.path.getsize("super_raw.img"))
+          super_file = "super_raw.img"
+          super_size = str(os.path.getsize(super_file))
+          meta_size = "65536"
+          meta_slots = "3"
+          groups = []
 
-          # Parse metadata size & slots
-          meta_size_match = re.search(r"Metadata max size:\s+(\d+)", lpdump_out)
-          meta_size = meta_size_match.group(1) if meta_size_match else "65536"
-          
-          slots_match = re.search(r"Metadata slot count:\s+(\d+)", lpdump_out)
-          meta_slots = slots_match.group(1) if slots_match else "3"
+          lpdump_bin = shutil.which("lpdump")
+          if lpdump_bin:
+              try:
+                  print("Found lpdump, parsing metadata...")
+                  lpdump_out = subprocess.check_output([lpdump_bin, super_file]).decode("utf-8")
 
-          # Parse groups
-          groups = re.findall(r"Group\s+([\w_]+):\s+size\s+(\d+)", lpdump_out)
-          if not groups:
-              groups = re.findall(r"Name:\s+([\w_]+)\n\s+Maximum size:\s+(\d+)\s+bytes", lpdump_out)
+                  size_match = re.search(r"Size:\s+(\d+)\s+bytes", lpdump_out)
+                  if size_match:
+                      super_size = size_match.group(1)
+
+                  meta_size_match = re.search(r"Metadata max size:\s+(\d+)", lpdump_out)
+                  if meta_size_match:
+                      meta_size = meta_size_match.group(1)
+
+                  slots_match = re.search(r"Metadata slot count:\s+(\d+)", lpdump_out)
+                  if slots_match:
+                      meta_slots = slots_match.group(1)
+
+                  groups = re.findall(r"Group\s+([\w_]+):\s+size\s+(\d+)", lpdump_out)
+                  if not groups:
+                      groups = re.findall(r"Name:\s+([\w_]+)\n\s+Maximum size:\s+(\d+)\s+bytes", lpdump_out)
+              except Exception as e:
+                  print(f"Warning: Failed to execute lpdump ({e}), falling back to default values.")
+          else:
+              print("Notice: lpdump binary not found in PATH. Proceeding with default super parameters.")
 
           cmd = [
               "lpmake",
@@ -141,7 +164,7 @@ jobs:
               "--output=super_debloated.img"
           ]
 
-          # Add groups to lpmake
+          # Add metadata groups
           added_groups = set()
           for g_name, g_size in groups:
               if g_name != "default" and g_name not in added_groups:
@@ -155,7 +178,7 @@ jobs:
 
           # Find all extracted partition images (_a and _b)
           part_dir = "extracted_partitions"
-          for fname in os.listdir(part_dir):
+          for fname in sorted(os.listdir(part_dir)):
               if fname.endswith(".img"):
                   pname = fname[:-4]
                   fpath = os.path.join(part_dir, fname)
