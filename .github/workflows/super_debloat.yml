@@ -1,4 +1,22 @@
-- name: Install Android Tools
+name: Realme Pad Mini Super Image Debloater
+
+on:
+  workflow_dispatch:
+    inputs:
+      super_url:
+        description: 'Direct Download URL to super.img'
+        required: true
+        type: string
+
+jobs:
+  debloat_and_repack:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Android Tools
         env:
           DEBIAN_FRONTEND: noninteractive
           NEEDRESTART_MODE: a
@@ -9,16 +27,164 @@
           mkdir -p bin
           
           echo "Downloading lpmake, lpunpack, and lpdump..."
-          # Download dynamic partition tools archive directly
           curl -sSL "https://github.com/phuss/lpmake-lpunpack/releases/download/v1.0/lpmake-lpunpack-linux-x86_64.tar.gz" | tar -xz -C bin/
           
-          # Fallback check to ensure all 3 tools exist
-          if [ ! -f bin/lpmake ] || [ ! -f bin/lpunpack ] || [ ! -f bin/lpdump ]; then
-            echo "Fallback download for dynamic partition binaries..."
-            curl -sSL -o bin/lpmake "https://raw.githubusercontent.com/unix-tools/android-tools-binaries/main/bin/lpmake" || true
-            curl -sSL -o bin/lpunpack "https://raw.githubusercontent.com/unix-tools/android-tools-binaries/main/bin/lpunpack" || true
-            curl -sSL -o bin/lpdump "https://raw.githubusercontent.com/unix-tools/android-tools-binaries/main/bin/lpdump" || true
+          chmod +x bin/* || true
+          echo "$GITHUB_WORKSPACE/bin" >> $GITHUB_PATH
+
+      - name: Download Super Image
+        run: |
+          echo "Downloading super.img from provided link..."
+          wget --show-progress -O input_super.img "${{ github.event.inputs.super_url }}"
+
+      - name: Convert Sparse to Raw Super Image
+        run: |
+          echo "Checking if image is sparse..."
+          if simg2img input_super.img super_raw.img 2>/dev/null; then
+            echo "Successfully unsparsed super image."
+            rm input_super.img
+          else
+            echo "Image is already raw."
+            mv input_super.img super_raw.img
           fi
 
-          chmod +x bin/*
-          echo "$GITHUB_WORKSPACE/bin" >> $GITHUB_PATH
+      - name: Extract Dynamic Partitions
+        run: |
+          mkdir -p extracted_partitions
+          lpunpack super_raw.img extracted_partitions/
+          echo "Extracted partitions:"
+          ls -lh extracted_partitions/
+
+      - name: Mount EXT4 Partitions and Delete Bloatware
+        env:
+          # ====================================================================
+          # EDIT YOUR MANUALLY HARDCODED BLOATWARE LIST HERE
+          # Format: partition_name/relative_path
+          # ====================================================================
+          DEBLOAT_LIST: |
+            product_a/app/YouTube
+            product_a/priv-app/Velvet
+            vendor_a/app/Chrome
+            system_a/app/GooglePay
+            system_ext_a/priv-app/SetupWizard
+          # ====================================================================
+        run: |
+          mkdir -p /tmp/target_mnt
+
+          echo "$DEBLOAT_LIST" | while read -r line; do
+            clean_line=$(echo "$line" | xargs)
+            if [ -n "$clean_line" ]; then
+              PART_NAME=$(echo "$clean_line" | cut -d'/' -f1)
+              REL_PATH=$(echo "$clean_line" | cut -d'/' -f2-)
+              IMG_PATH="extracted_partitions/${PART_NAME}.img"
+
+              if [ -f "$IMG_PATH" ]; then
+                echo "=========================================="
+                echo "Mounting: $PART_NAME ($IMG_PATH)"
+                
+                # Mount ext4 image as read-write loop device
+                sudo mount -o loop,rw "$IMG_PATH" /tmp/target_mnt
+                
+                TARGET="/tmp/target_mnt/$REL_PATH"
+                if [ -e "$TARGET" ]; then
+                  echo "Deleting: $TARGET"
+                  sudo rm -rf "$TARGET"
+                else
+                  echo "Warning: Path not found inside $PART_NAME -> $REL_PATH"
+                fi
+
+                # Flush writes and unmount safely
+                sync
+                sudo umount /tmp/target_mnt
+                echo "Unmounted $PART_NAME successfully."
+              else
+                echo "Error: Partition file $IMG_PATH does not exist!"
+              fi
+            fi
+          done
+
+      - name: Parse Metadata and Rebuild Super Image with lpmake
+        run: |
+          python3 - << 'EOF'
+          import subprocess
+          import re
+          import os
+
+          # Run lpdump to read original metadata
+          lpdump_out = subprocess.check_output(["lpdump", "super_raw.img"]).decode("utf-8")
+
+          # Parse total super size
+          size_match = re.search(r"Size:\s+(\d+)\s+bytes", lpdump_out)
+          super_size = size_match.group(1) if size_match else str(os.path.getsize("super_raw.img"))
+
+          # Parse metadata size & slots
+          meta_size_match = re.search(r"Metadata max size:\s+(\d+)", lpdump_out)
+          meta_size = meta_size_match.group(1) if meta_size_match else "65536"
+          
+          slots_match = re.search(r"Metadata slot count:\s+(\d+)", lpdump_out)
+          meta_slots = slots_match.group(1) if slots_match else "3"
+
+          # Parse groups
+          groups = re.findall(r"Group\s+([\w_]+):\s+size\s+(\d+)", lpdump_out)
+          if not groups:
+              groups = re.findall(r"Name:\s+([\w_]+)\n\s+Maximum size:\s+(\d+)\s+bytes", lpdump_out)
+
+          cmd = [
+              "lpmake",
+              f"--device-size={super_size}",
+              f"--metadata-size={meta_size}",
+              f"--metadata-slots={meta_slots}",
+              "--sparse",
+              "--output=super_debloated.img"
+          ]
+
+          # Add groups to lpmake
+          added_groups = set()
+          for g_name, g_size in groups:
+              if g_name != "default" and g_name not in added_groups:
+                  cmd.append(f"--group={g_name}:{g_size}")
+                  added_groups.add(g_name)
+
+          if not added_groups:
+              cmd.append(f"--group=unisoc_dynamic_partitions_a:{super_size}")
+              cmd.append(f"--group=unisoc_dynamic_partitions_b:0")
+              added_groups.add("unisoc_dynamic_partitions_a")
+
+          # Find all extracted partition images (_a and _b)
+          part_dir = "extracted_partitions"
+          for fname in os.listdir(part_dir):
+              if fname.endswith(".img"):
+                  pname = fname[:-4]
+                  fpath = os.path.join(part_dir, fname)
+                  psize = os.path.getsize(fpath)
+                  
+                  assigned_group = "default"
+                  if pname.endswith("_a"):
+                      for g in added_groups:
+                          if g.endswith("_a") or "a" in g:
+                              assigned_group = g
+                              break
+                  elif pname.endswith("_b"):
+                      for g in added_groups:
+                          if g.endswith("_b") or "b" in g:
+                              assigned_group = g
+                              break
+                  
+                  if assigned_group == "default" and added_groups:
+                      assigned_group = list(added_groups)[0]
+
+                  cmd.append(f"--partition={pname}:none:{psize}:{assigned_group}")
+                  if psize > 0:
+                      cmd.append(f"--image={pname}={fpath}")
+
+          print("\n=== Executing lpmake ===")
+          print(" ".join(cmd))
+          subprocess.run(cmd, check=True)
+          EOF
+
+      - name: Upload Repacked Super Image Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: super_debloated_realme_pad_mini
+          path: super_debloated.img
+          retention-days: 7
