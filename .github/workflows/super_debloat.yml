@@ -42,32 +42,46 @@ jobs:
         run: |
           echo "Downloading super.img from provided link..."
           wget --show-progress -O input_super.img "${{ github.event.inputs.super_url }}"
-
+          
       - name: Convert Sparse to Raw Super Image
         run: |
           python3 - << 'EOF'
+          import struct
           import os
-          import subprocess
 
-          input_file = "input_super.img"
-          raw_file = "super_raw.img"
+          input_path = "input_super.img"
+          raw_path = "super_raw.img"
 
-          if not os.path.exists(input_file):
-              raise FileNotFoundError(f"{input_file} does not exist.")
+          with open(input_path, "rb") as f_in:
+              header = f_in.read(28)
+              if len(header) == 28:
+                  magic, major, minor, file_hdr_sz, chunk_hdr_sz, blk_sz, total_blks, total_chunks, checksum = struct.unpack("<IHHHHHHII", header)
+                  if magic == 0xED26764B:
+                      print(f"Sparse image detected (Block size: {blk_sz}, Total blocks: {total_blks}). Unsparsing...")
+                      f_in.seek(file_hdr_sz)
+                      with open(raw_path, "wb") as f_out:
+                          for _ in range(total_chunks):
+                              chunk_hdr = f_in.read(12)
+                              if len(chunk_hdr) < 12:
+                                  break
+                              chunk_type, reserved, chunk_sz, total_sz = struct.unpack("<HHII", chunk_hdr)
+                              data_sz = total_sz - chunk_hdr_sz
+                              
+                              if chunk_type == 0xCAC1: # RAW
+                                  f_out.write(f_in.read(data_sz))
+                              elif chunk_type == 0xCAC2: # FILL
+                                  fill_data = f_in.read(4)
+                                  f_out.write(fill_data * (chunk_sz * blk_sz // 4))
+                              elif chunk_type == 0xCAC3: # DONT_CARE
+                                  f_out.write(b'\x00' * (chunk_sz * blk_sz))
+                              elif chunk_type == 0xCAC4: # CRC32
+                                  f_in.read(data_sz)
+                      os.remove(input_path)
+                      print("Successfully unsparsed image to super_raw.img.")
+                      exit(0)
 
-          with open(input_file, "rb") as f:
-              magic = f.read(4)
-
-          # 0xed26764b in little-endian byte format is b"\x4b\x76\x26\xed"
-          if magic == b"\x4b\x76\x26\xed":
-              print("Header magic matches Android Sparse Image (0xed26764b).")
-              print("Converting sparse image to raw image using simg2img...")
-              subprocess.run(["simg2img", input_file, raw_file], check=True)
-              os.remove(input_file)
-              print("Successfully unsparsed super image.")
-          else:
-              print("Header magic does not match sparse image. Treating as raw image.")
-              os.rename(input_file, raw_file)
+          print("Image is not sparse. Renaming to super_raw.img.")
+          os.rename(input_path, raw_path)
           EOF
 
       - name: Extract Dynamic Partitions
