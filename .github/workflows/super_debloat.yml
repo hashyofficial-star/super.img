@@ -25,10 +25,13 @@ jobs:
           sudo apt-get install -y android-sdk-libsparse-utils e2fsprogs python3 wget curl
           
           mkdir -p bin
+          echo "Cloning prebuilt Android partition tools..."
+          git clone --depth=1 https://github.com/Rprop/aosp15_partition_tools.git temp_tools
           
-          echo "Downloading lpmake, lpunpack, and lpdump..."
-          curl -sSL "https://github.com/phuss/lpmake-lpunpack/releases/download/v1.0/lpmake-lpunpack-linux-x86_64.tar.gz" | tar -xz -C bin/
-          
+          # Dynamically locate and copy lpmake, lpunpack, and lpdump binaries to bin/
+          find temp_tools -type f \( -name "lpmake" -o -name "lpunpack" -o -name "lpdump" \) -exec cp {} bin/ \;
+          rm -rf temp_tools
+
           chmod +x bin/* || true
           echo "$GITHUB_WORKSPACE/bin" >> $GITHUB_PATH
 
