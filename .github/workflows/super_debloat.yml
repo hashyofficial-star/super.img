@@ -52,19 +52,22 @@ jobs:
           input_path = "input_super.img"
           raw_path = "super_raw.img"
 
+          if not os.path.exists(input_path):
+              raise FileNotFoundError(f"{input_path} not found.")
+
           with open(input_path, "rb") as f_in:
               header = f_in.read(28)
               if len(header) == 28:
-                  magic, major, minor, file_hdr_sz, chunk_hdr_sz, blk_sz, total_blks, total_chunks, checksum = struct.unpack("<IHHHHHHII", header)
+                  magic, major, minor, file_hdr_sz, chunk_hdr_sz, blk_sz, total_blks, total_chunks, checksum = struct.unpack("<IHHHHIIII", header)
                   if magic == 0xED26764B:
-                      print(f"Sparse image detected (Block size: {blk_sz}, Total blocks: {total_blks}). Unsparsing...")
+                      print(f"Sparse image detected (Block size: {blk_sz}, Total blocks: {total_blks}, Chunks: {total_chunks}). Unsparsing...")
                       f_in.seek(file_hdr_sz)
                       with open(raw_path, "wb") as f_out:
                           for _ in range(total_chunks):
-                              chunk_hdr = f_in.read(12)
+                              chunk_hdr = f_in.read(chunk_hdr_sz)
                               if len(chunk_hdr) < 12:
                                   break
-                              chunk_type, reserved, chunk_sz, total_sz = struct.unpack("<HHII", chunk_hdr)
+                              chunk_type, reserved, chunk_sz, total_sz = struct.unpack("<HHII", chunk_hdr[:12])
                               data_sz = total_sz - chunk_hdr_sz
                               
                               if chunk_type == 0xCAC1: # RAW
@@ -75,7 +78,10 @@ jobs:
                               elif chunk_type == 0xCAC3: # DONT_CARE
                                   f_out.write(b'\x00' * (chunk_sz * blk_sz))
                               elif chunk_type == 0xCAC4: # CRC32
-                                  f_in.read(data_sz)
+                                  if data_sz > 0:
+                                      f_in.read(data_sz)
+                              else:
+                                  raise ValueError(f"Unknown chunk type 0x{chunk_type:04X}")
                       os.remove(input_path)
                       print("Successfully unsparsed image to super_raw.img.")
                       exit(0)
@@ -83,7 +89,7 @@ jobs:
           print("Image is not sparse. Renaming to super_raw.img.")
           os.rename(input_path, raw_path)
           EOF
-
+        
       - name: Extract Dynamic Partitions
         run: |
           mkdir -p extracted_partitions
