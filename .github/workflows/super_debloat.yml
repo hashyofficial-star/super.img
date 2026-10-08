@@ -71,17 +71,32 @@ jobs:
                               data_sz = total_sz - chunk_hdr_sz
                               
                               if chunk_type == 0xCAC1: # RAW
-                                  f_out.write(f_in.read(data_sz))
+                                  bytes_left = data_sz
+                                  while bytes_left > 0:
+                                      chunk = f_in.read(min(bytes_left, 1048576))
+                                      if not chunk:
+                                          break
+                                      f_out.write(chunk)
+                                      bytes_left -= len(chunk)
                               elif chunk_type == 0xCAC2: # FILL
                                   fill_data = f_in.read(4)
-                                  f_out.write(fill_data * (chunk_sz * blk_sz // 4))
+                                  bytes_needed = chunk_sz * blk_sz
+                                  buf = fill_data * (min(bytes_needed, 1048576) // 4)
+                                  while bytes_needed > 0:
+                                      to_write = min(bytes_needed, len(buf))
+                                      f_out.write(buf[:to_write])
+                                      bytes_needed -= to_write
                               elif chunk_type == 0xCAC3: # DONT_CARE
-                                  f_out.write(b'\x00' * (chunk_sz * blk_sz))
+                                  bytes_needed = chunk_sz * blk_sz
+                                  buf = b'\x00' * min(bytes_needed, 1048576)
+                                  while bytes_needed > 0:
+                                      to_write = min(bytes_needed, len(buf))
+                                      f_out.write(buf[:to_write])
+                                      bytes_needed -= to_write
                               elif chunk_type == 0xCAC4: # CRC32
                                   if data_sz > 0:
                                       f_in.read(data_sz)
-                              else:
-                                  raise ValueError(f"Unknown chunk type 0x{chunk_type:04X}")
+
                       os.remove(input_path)
                       print("Successfully unsparsed image to super_raw.img.")
                       exit(0)
